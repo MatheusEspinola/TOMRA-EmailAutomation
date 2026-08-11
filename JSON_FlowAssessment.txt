@@ -1,0 +1,198 @@
+{
+  "$schema": "https://power-automate-tools.local/flow-editor.json#",
+  "connectionReferences": {
+    "shared_office365": {
+      "connectionName": "shared-office365-37aff3d7-66be-41df-b03b-971885f11306",
+      "connectionReferenceLogicalName": "jsmsrv_CROutlook",
+      "source": "Invoker",
+      "id": "/providers/Microsoft.PowerApps/apis/shared_office365",
+      "displayName": "Office 365 Outlook",
+      "brandColor": "#0078D4",
+      "tier": "Standard",
+      "apiName": "office365",
+      "isProcessSimpleApiReferenceConversionAlreadyDone": false
+    }
+  },
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "$connections": { "defaultValue": {}, "type": "Object" },
+      "$authentication": { "defaultValue": {}, "type": "SecureObject" }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Button",
+        "inputs": { "schema": { "type": "object", "properties": {}, "required": [] } }
+      }
+    },
+    "actions": {
+      "CONFIG_Mailbox": {
+        "runAfter": {},
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            { "name": "MailboxAddress", "type": "string", "value": "ssc-europe@tomra.com" }
+          ]
+        }
+      },
+      "CONFIG_DaysBack": {
+        "runAfter": { "CONFIG_Mailbox": ["Succeeded"] },
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [ { "name": "DaysBack", "type": "integer", "value": 30 } ]
+        }
+      },
+      "A1_Get_folders": {
+        "runAfter": { "CONFIG_DaysBack": ["Succeeded"] },
+        "type": "OpenApiConnection",
+        "inputs": {
+          "host": {
+            "connectionName": "shared_office365",
+            "operationId": "HttpRequest",
+            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+          },
+          "parameters": {
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/mailFolders?$top=100&$select=id,displayName,totalItemCount,unreadItemCount,childFolderCount')",
+            "Method": "GET",
+            "ContentType": "application/json"
+          },
+          "authentication": {
+            "type": "Raw",
+            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
+          }
+        }
+      },
+      "A2_Get_master_categories": {
+        "runAfter": { "A1_Get_folders": ["Succeeded"] },
+        "type": "OpenApiConnection",
+        "inputs": {
+          "host": {
+            "connectionName": "shared_office365",
+            "operationId": "HttpRequest",
+            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+          },
+          "parameters": {
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/outlook/masterCategories')",
+            "Method": "GET",
+            "ContentType": "application/json"
+          },
+          "authentication": {
+            "type": "Raw",
+            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
+          }
+        }
+      },
+      "A3_Get_messages_sample": {
+        "runAfter": { "A2_Get_master_categories": ["Succeeded"] },
+        "type": "OpenApiConnection",
+        "inputs": {
+          "host": {
+            "connectionName": "shared_office365",
+            "operationId": "HttpRequest",
+            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+          },
+          "parameters": {
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=500&$select=id,conversationId,categories,receivedDateTime,isRead,from&$orderby=receivedDateTime%20desc&$filter=receivedDateTime%20ge%20', formatDateTime(addDays(utcNow(), mul(variables('DaysBack'), -1)), 'yyyy-MM-ddTHH:mm:ssZ'))",
+            "Method": "GET",
+            "ContentType": "application/json"
+          },
+          "authentication": {
+            "type": "Raw",
+            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
+          }
+        }
+      },
+      "A4_Get_inbox_rules": {
+        "runAfter": { "A3_Get_messages_sample": ["Succeeded"] },
+        "type": "OpenApiConnection",
+        "inputs": {
+          "host": {
+            "connectionName": "shared_office365",
+            "operationId": "HttpRequest",
+            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+          },
+          "parameters": {
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/mailFolders/inbox/messageRules')",
+            "Method": "GET",
+            "ContentType": "application/json"
+          },
+          "authentication": {
+            "type": "Raw",
+            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
+          }
+        }
+      },
+      "B1_Messages": {
+        "runAfter": { "A4_Get_inbox_rules": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@body('A3_Get_messages_sample')?['value']"
+      },
+      "B2_Tagged": {
+        "runAfter": { "B1_Messages": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@outputs('B1_Messages')",
+          "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
+        }
+      },
+      "B3_Unread": {
+        "runAfter": { "B2_Tagged": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@outputs('B1_Messages')",
+          "where": "@equals(item()?['isRead'], false)"
+        }
+      },
+      "B4_Select_conversations": {
+        "runAfter": { "B3_Unread": ["Succeeded"] },
+        "type": "Select",
+        "inputs": {
+          "from": "@outputs('B1_Messages')",
+          "select": "@item()?['conversationId']"
+        }
+      },
+      "B5_Select_categories": {
+        "runAfter": { "B4_Select_conversations": ["Succeeded"] },
+        "type": "Select",
+        "inputs": {
+          "from": "@body('B2_Tagged')",
+          "select": "@first(item()?['categories'])"
+        }
+      },
+      "B6_Select_senders": {
+        "runAfter": { "B5_Select_categories": ["Succeeded"] },
+        "type": "Select",
+        "inputs": {
+          "from": "@outputs('B1_Messages')",
+          "select": "@item()?['from']?['emailAddress']?['address']"
+        }
+      },
+      "REPORT": {
+        "runAfter": { "B6_Select_senders": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": {
+          "mailbox": "@variables('MailboxAddress')",
+          "period_days": "@variables('DaysBack')",
+          "sample_size": "@length(outputs('B1_Messages'))",
+          "newest_message": "@first(outputs('B1_Messages'))?['receivedDateTime']",
+          "oldest_message": "@last(outputs('B1_Messages'))?['receivedDateTime']",
+          "days_covered_by_sample": "@div(sub(ticks(first(outputs('B1_Messages'))?['receivedDateTime']), ticks(last(outputs('B1_Messages'))?['receivedDateTime'])), 864000000000)",
+          "messages_tagged": "@length(body('B2_Tagged'))",
+          "messages_untagged": "@sub(length(outputs('B1_Messages')), length(body('B2_Tagged')))",
+          "tagging_coverage_pct": "@div(mul(length(body('B2_Tagged')), 100), max(createArray(length(outputs('B1_Messages')), 1)))",
+          "messages_unread": "@length(body('B3_Unread'))",
+          "distinct_conversations": "@length(union(body('B4_Select_conversations'), body('B4_Select_conversations')))",
+          "avg_messages_per_thread": "@div(mul(length(outputs('B1_Messages')), 100), max(createArray(length(union(body('B4_Select_conversations'), body('B4_Select_conversations'))), 1)))",
+          "categories_in_use": "@union(body('B5_Select_categories'), body('B5_Select_categories'))",
+          "master_categories": "@body('A2_Get_master_categories')?['value']",
+          "distinct_senders_count": "@length(union(body('B6_Select_senders'), body('B6_Select_senders')))",
+          "folders": "@body('A1_Get_folders')?['value']",
+          "inbox_rules_count": "@length(coalesce(body('A4_Get_inbox_rules')?['value'], json('[]')))",
+          "inbox_rules": "@body('A4_Get_inbox_rules')?['value']"
+        }
+      }
+    }
+  }
+}
