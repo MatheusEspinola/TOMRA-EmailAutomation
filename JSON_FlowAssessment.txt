@@ -104,28 +104,8 @@
           }
         }
       },
-      "A4_Get_inbox_rules": {
-        "runAfter": { "A3_Get_messages_sample": ["Succeeded"] },
-        "type": "OpenApiConnection",
-        "inputs": {
-          "host": {
-            "connectionName": "shared_office365",
-            "operationId": "HttpRequest",
-            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
-          },
-          "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/mailFolders/inbox/messageRules')",
-            "Method": "GET",
-            "ContentType": "application/json"
-          },
-          "authentication": {
-            "type": "Raw",
-            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
-          }
-        }
-      },
       "B1_Messages": {
-        "runAfter": { "A4_Get_inbox_rules": ["Succeeded"] },
+        "runAfter": { "A3_Get_messages_sample": ["Succeeded"] },
         "type": "Compose",
         "inputs": "@body('A3_Get_messages_sample')?['value']"
       },
@@ -184,13 +164,11 @@
           "tagging_coverage_pct": "@div(mul(length(body('B2_Tagged')), 100), max(createArray(length(outputs('B1_Messages')), 1)))",
           "messages_unread": "@length(body('B3_Unread'))",
           "distinct_conversations": "@length(union(body('B4_Select_conversations'), body('B4_Select_conversations')))",
-          "avg_messages_per_thread": "@div(mul(length(outputs('B1_Messages')), 100), max(createArray(length(union(body('B4_Select_conversations'), body('B4_Select_conversations'))), 1)))",
+          "avg_messages_per_thread_x100": "@div(mul(length(outputs('B1_Messages')), 100), max(createArray(length(union(body('B4_Select_conversations'), body('B4_Select_conversations'))), 1)))",
           "categories_in_use": "@union(body('B5_Select_categories'), body('B5_Select_categories'))",
           "master_categories": "@body('A2_Get_master_categories')?['value']",
           "distinct_senders_count": "@length(union(body('B6_Select_senders'), body('B6_Select_senders')))",
-          "folders": "@body('A1_Get_folders')?['value']",
-          "inbox_rules_count": "@length(coalesce(body('A4_Get_inbox_rules')?['value'], json('[]')))",
-          "inbox_rules": "@body('A4_Get_inbox_rules')?['value']"
+          "folders": "@body('A1_Get_folders')?['value']"
         }
       }
     }
