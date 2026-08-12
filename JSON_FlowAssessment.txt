@@ -36,13 +36,26 @@
           ]
         }
       },
-      "VAR_Candidates": {
+      "CONFIG_ConversationId": {
         "runAfter": { "CONFIG_Mailbox": ["Succeeded"] },
         "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "Candidates", "type": "array", "value": [] } ] }
+        "inputs": {
+          "variables": [
+            {
+              "name": "TargetConversationId",
+              "type": "string",
+              "value": "AAQkAGM2ZTdjMzhjLTIxZDktNDM1Zi05Y2I5LWRhMDUyZTcxMWZjMwAQADJ4ArUlbZJAndBwcA-LqwM="
+            }
+          ]
+        }
       },
-      "A1_Get_messages": {
-        "runAfter": { "VAR_Candidates": ["Succeeded"] },
+      "CONFIG_DryRun": {
+        "runAfter": { "CONFIG_ConversationId": ["Succeeded"] },
+        "type": "InitializeVariable",
+        "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": true } ] }
+      },
+      "A1_Get_thread": {
+        "runAfter": { "CONFIG_DryRun": ["Succeeded"] },
         "type": "OpenApiConnection",
         "inputs": {
           "host": {
@@ -51,7 +64,7 @@
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
           },
           "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=300&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc')",
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=50&$select=id,conversationId,categories,subject,receivedDateTime&$filter=conversationId%20eq%20''', uriComponent(variables('TargetConversationId')), '''')",
             "Method": "GET",
             "ContentType": "application/json"
           },
@@ -61,81 +74,82 @@
           }
         }
       },
-      "B1_Messages": {
-        "runAfter": { "A1_Get_messages": ["Succeeded"] },
+      "B1_Thread": {
+        "runAfter": { "A1_Get_thread": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@body('A1_Get_messages')?['value']"
+        "inputs": "@body('A1_Get_thread')?['value']"
       },
-      "B2_Select_conversations": {
-        "runAfter": { "B1_Messages": ["Succeeded"] },
-        "type": "Select",
+      "B2_Tagged": {
+        "runAfter": { "B1_Thread": ["Succeeded"] },
+        "type": "Query",
         "inputs": {
-          "from": "@outputs('B1_Messages')",
-          "select": "@item()?['conversationId']"
+          "from": "@outputs('B1_Thread')",
+          "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
         }
       },
-      "B3_Distinct": {
-        "runAfter": { "B2_Select_conversations": ["Succeeded"] },
-        "type": "Compose",
-        "inputs": "@union(body('B2_Select_conversations'), body('B2_Select_conversations'))"
+      "B3_Untagged": {
+        "runAfter": { "B2_Tagged": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@outputs('B1_Thread')",
+          "where": "@equals(length(coalesce(item()?['categories'], json('[]'))), 0)"
+        }
       },
-      "Loop_conversations": {
-        "runAfter": { "B3_Distinct": ["Succeeded"] },
-        "type": "Foreach",
-        "foreach": "@outputs('B3_Distinct')",
-        "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+      "PLAN": {
+        "runAfter": { "B3_Untagged": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": {
+          "dry_run": "@variables('DryRun')",
+          "thread_subject": "@first(outputs('B1_Thread'))?['subject']",
+          "messages_in_thread": "@length(outputs('B1_Thread'))",
+          "already_tagged": "@length(body('B2_Tagged'))",
+          "will_be_tagged": "@length(body('B3_Untagged'))",
+          "category_to_apply": "@first(body('B2_Tagged'))?['categories']",
+          "target_message_ids": "@body('B3_Untagged')"
+        }
+      },
+      "Execute_if_not_dry_run": {
+        "runAfter": { "PLAN": ["Succeeded"] },
+        "type": "If",
+        "expression": {
+          "and": [
+            { "equals": [ "@variables('DryRun')", false ] },
+            { "greater": [ "@length(body('B2_Tagged'))", 0 ] },
+            { "greater": [ "@length(body('B3_Untagged'))", 0 ] }
+          ]
+        },
         "actions": {
-          "C1_Conv_messages": {
+          "Loop_untagged": {
             "runAfter": {},
-            "type": "Query",
-            "inputs": {
-              "from": "@outputs('B1_Messages')",
-              "where": "@equals(item()?['conversationId'], items('Loop_conversations'))"
-            }
-          },
-          "C2_Tagged": {
-            "runAfter": { "C1_Conv_messages": ["Succeeded"] },
-            "type": "Query",
-            "inputs": {
-              "from": "@body('C1_Conv_messages')",
-              "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
-            }
-          },
-          "C3_Is_candidate": {
-            "runAfter": { "C2_Tagged": ["Succeeded"] },
-            "type": "If",
-            "expression": {
-              "and": [
-                { "greater": [ "@length(body('C2_Tagged'))", 0 ] },
-                { "greater": [ "@sub(length(body('C1_Conv_messages')), length(body('C2_Tagged')))", 0 ] },
-                { "less": [ "@length(body('C1_Conv_messages'))", 8 ] }
-              ]
-            },
+            "type": "Foreach",
+            "foreach": "@body('B3_Untagged')",
+            "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
             "actions": {
-              "D1_Add_candidate": {
+              "Apply_category": {
                 "runAfter": {},
-                "type": "AppendToArrayVariable",
+                "type": "OpenApiConnection",
                 "inputs": {
-                  "name": "Candidates",
-                  "value": {
-                    "conversationId": "@items('Loop_conversations')",
-                    "subject": "@first(body('C1_Conv_messages'))?['subject']",
-                    "total_messages": "@length(body('C1_Conv_messages'))",
-                    "already_tagged": "@length(body('C2_Tagged'))",
-                    "would_inherit": "@sub(length(body('C1_Conv_messages')), length(body('C2_Tagged')))",
-                    "category": "@first(body('C2_Tagged'))?['categories']"
+                  "host": {
+                    "connectionName": "shared_office365",
+                    "operationId": "HttpRequest",
+                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+                  },
+                  "parameters": {
+                    "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', items('Loop_untagged')?['id'])",
+                    "Method": "PATCH",
+                    "Body": { "categories": "@first(body('B2_Tagged'))?['categories']" },
+                    "ContentType": "application/json"
+                  },
+                  "authentication": {
+                    "type": "Raw",
+                    "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
                   }
                 }
               }
-            },
-            "else": { "actions": {} }
+            }
           }
-        }
-      },
-      "REPORT": {
-        "runAfter": { "Loop_conversations": ["Succeeded"] },
-        "type": "Compose",
-        "inputs": "@variables('Candidates')"
+        },
+        "else": { "actions": {} }
       }
     }
   }
