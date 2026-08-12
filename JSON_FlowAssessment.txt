@@ -48,7 +48,7 @@
       "CONFIG_DryRun": {
         "runAfter": { "CONFIG_SubjectMarker": ["Succeeded"] },
         "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": true } ] }
+        "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": false } ] }
       },
       "A1_Get_recent": {
         "runAfter": { "CONFIG_DryRun": ["Succeeded"] },
@@ -112,18 +112,21 @@
           "where": "@equals(length(coalesce(item()?['categories'], json('[]'))), 0)"
         }
       },
-      "PLAN": {
+      "B7_Body": {
         "runAfter": { "B6_Untagged": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@setProperty(json('{}'), 'categories', coalesce(first(body('B5_Tagged'))?['categories'], json('[]')))"
+      },
+      "PLAN": {
+        "runAfter": { "B7_Body": ["Succeeded"] },
         "type": "Compose",
         "inputs": {
           "dry_run": "@variables('DryRun')",
-          "subject_marker": "@variables('SubjectMarker')",
           "found_conversation_id": "@outputs('B3_ConversationId')",
           "messages_in_thread": "@length(body('B4_Thread'))",
           "already_tagged": "@length(body('B5_Tagged'))",
           "will_be_tagged": "@length(body('B6_Untagged'))",
-          "category_to_apply": "@first(body('B5_Tagged'))?['categories']",
-          "thread_messages": "@body('B4_Thread')"
+          "body_to_send": "@outputs('B7_Body')"
         }
       },
       "Execute_if_not_dry_run": {
@@ -155,7 +158,7 @@
                   "parameters": {
                     "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', items('Loop_untagged')?['id'])",
                     "Method": "PATCH",
-                    "Body": { "categories": "@first(body('B5_Tagged'))?['categories']" },
+                    "Body": "@outputs('B7_Body')",
                     "ContentType": "application/json"
                   },
                   "authentication": {
