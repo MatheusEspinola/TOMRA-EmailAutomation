@@ -36,25 +36,21 @@
           ]
         }
       },
-      "CONFIG_ConversationId": {
+      "CONFIG_SubjectMarker": {
         "runAfter": { "CONFIG_Mailbox": ["Succeeded"] },
         "type": "InitializeVariable",
         "inputs": {
           "variables": [
-            {
-              "name": "TargetConversationId",
-              "type": "string",
-              "value": "AAQkAGM2ZTdjMzhjLTIxZDktNDM1Zi05Y2I5LWRhMDUyZTcxMWZjMwAQADJ4ArUlbZJAndBwcA-LqwM="
-            }
+            { "name": "SubjectMarker", "type": "string", "value": "Power Automate - Inherit Categorization" }
           ]
         }
       },
       "CONFIG_DryRun": {
-        "runAfter": { "CONFIG_ConversationId": ["Succeeded"] },
+        "runAfter": { "CONFIG_SubjectMarker": ["Succeeded"] },
         "type": "InitializeVariable",
         "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": true } ] }
       },
-      "A1_Get_thread": {
+      "A1_Get_recent": {
         "runAfter": { "CONFIG_DryRun": ["Succeeded"] },
         "type": "OpenApiConnection",
         "inputs": {
@@ -64,7 +60,7 @@
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
           },
           "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=50&$select=id,conversationId,categories,subject,receivedDateTime&$filter=conversationId%20eq%20''', uriComponent(variables('TargetConversationId')), '''')",
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=150&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc')",
             "Method": "GET",
             "ContentType": "application/json"
           },
@@ -74,38 +70,60 @@
           }
         }
       },
-      "B1_Thread": {
-        "runAfter": { "A1_Get_thread": ["Succeeded"] },
+      "B1_Messages": {
+        "runAfter": { "A1_Get_recent": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@body('A1_Get_thread')?['value']"
+        "inputs": "@body('A1_Get_recent')?['value']"
       },
-      "B2_Tagged": {
-        "runAfter": { "B1_Thread": ["Succeeded"] },
+      "B2_Demo_matches": {
+        "runAfter": { "B1_Messages": ["Succeeded"] },
         "type": "Query",
         "inputs": {
-          "from": "@outputs('B1_Thread')",
+          "from": "@outputs('B1_Messages')",
+          "where": "@contains(coalesce(item()?['subject'], ''), variables('SubjectMarker'))"
+        }
+      },
+      "B3_ConversationId": {
+        "runAfter": { "B2_Demo_matches": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@first(body('B2_Demo_matches'))?['conversationId']"
+      },
+      "B4_Thread": {
+        "runAfter": { "B3_ConversationId": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@outputs('B1_Messages')",
+          "where": "@equals(item()?['conversationId'], outputs('B3_ConversationId'))"
+        }
+      },
+      "B5_Tagged": {
+        "runAfter": { "B4_Thread": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@body('B4_Thread')",
           "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
         }
       },
-      "B3_Untagged": {
-        "runAfter": { "B2_Tagged": ["Succeeded"] },
+      "B6_Untagged": {
+        "runAfter": { "B5_Tagged": ["Succeeded"] },
         "type": "Query",
         "inputs": {
-          "from": "@outputs('B1_Thread')",
+          "from": "@body('B4_Thread')",
           "where": "@equals(length(coalesce(item()?['categories'], json('[]'))), 0)"
         }
       },
       "PLAN": {
-        "runAfter": { "B3_Untagged": ["Succeeded"] },
+        "runAfter": { "B6_Untagged": ["Succeeded"] },
         "type": "Compose",
         "inputs": {
           "dry_run": "@variables('DryRun')",
-          "thread_subject": "@first(outputs('B1_Thread'))?['subject']",
-          "messages_in_thread": "@length(outputs('B1_Thread'))",
-          "already_tagged": "@length(body('B2_Tagged'))",
-          "will_be_tagged": "@length(body('B3_Untagged'))",
-          "category_to_apply": "@first(body('B2_Tagged'))?['categories']",
-          "target_message_ids": "@body('B3_Untagged')"
+          "subject_marker": "@variables('SubjectMarker')",
+          "found_conversation_id": "@outputs('B3_ConversationId')",
+          "messages_in_thread": "@length(body('B4_Thread'))",
+          "already_tagged": "@length(body('B5_Tagged'))",
+          "will_be_tagged": "@length(body('B6_Untagged'))",
+          "category_to_apply": "@first(body('B5_Tagged'))?['categories']",
+          "thread_messages": "@body('B4_Thread')"
         }
       },
       "Execute_if_not_dry_run": {
@@ -114,15 +132,15 @@
         "expression": {
           "and": [
             { "equals": [ "@variables('DryRun')", false ] },
-            { "greater": [ "@length(body('B2_Tagged'))", 0 ] },
-            { "greater": [ "@length(body('B3_Untagged'))", 0 ] }
+            { "greater": [ "@length(body('B5_Tagged'))", 0 ] },
+            { "greater": [ "@length(body('B6_Untagged'))", 0 ] }
           ]
         },
         "actions": {
           "Loop_untagged": {
             "runAfter": {},
             "type": "Foreach",
-            "foreach": "@body('B3_Untagged')",
+            "foreach": "@body('B6_Untagged')",
             "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
             "actions": {
               "Apply_category": {
@@ -137,7 +155,7 @@
                   "parameters": {
                     "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', items('Loop_untagged')?['id'])",
                     "Method": "PATCH",
-                    "Body": { "categories": "@first(body('B2_Tagged'))?['categories']" },
+                    "Body": { "categories": "@first(body('B5_Tagged'))?['categories']" },
                     "ContentType": "application/json"
                   },
                   "authentication": {
