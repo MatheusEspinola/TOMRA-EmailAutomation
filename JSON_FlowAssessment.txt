@@ -9,8 +9,7 @@
       "displayName": "Office 365 Outlook",
       "brandColor": "#0078D4",
       "tier": "Standard",
-      "apiName": "office365",
-      "isProcessSimpleApiReferenceConversionAlreadyDone": false
+      "apiName": "office365"
     }
   },
   "definition": {
@@ -37,28 +36,13 @@
           ]
         }
       },
-      "CONFIG_DaysBack": {
+      "VAR_Candidates": {
         "runAfter": { "CONFIG_Mailbox": ["Succeeded"] },
         "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "DaysBack", "type": "integer", "value": 30 } ] }
+        "inputs": { "variables": [ { "name": "Candidates", "type": "array", "value": [] } ] }
       },
-      "VAR_ConvsTagged": {
-        "runAfter": { "CONFIG_DaysBack": ["Succeeded"] },
-        "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "ConvsTagged", "type": "integer", "value": 0 } ] }
-      },
-      "VAR_ConvsUntagged": {
-        "runAfter": { "VAR_ConvsTagged": ["Succeeded"] },
-        "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "ConvsUntagged", "type": "integer", "value": 0 } ] }
-      },
-      "VAR_WouldInherit": {
-        "runAfter": { "VAR_ConvsUntagged": ["Succeeded"] },
-        "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "WouldInherit", "type": "integer", "value": 0 } ] }
-      },
-      "A1_Get_inbox_subfolders": {
-        "runAfter": { "VAR_WouldInherit": ["Succeeded"] },
+      "A1_Get_messages": {
+        "runAfter": { "VAR_Candidates": ["Succeeded"] },
         "type": "OpenApiConnection",
         "inputs": {
           "host": {
@@ -67,27 +51,7 @@
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
           },
           "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/mailFolders/inbox/childFolders?$top=50&$select=id,displayName,totalItemCount,unreadItemCount')",
-            "Method": "GET",
-            "ContentType": "application/json"
-          },
-          "authentication": {
-            "type": "Raw",
-            "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
-          }
-        }
-      },
-      "A2_Get_messages": {
-        "runAfter": { "A1_Get_inbox_subfolders": ["Succeeded"] },
-        "type": "OpenApiConnection",
-        "inputs": {
-          "host": {
-            "connectionName": "shared_office365",
-            "operationId": "HttpRequest",
-            "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
-          },
-          "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=500&$select=id,conversationId,categories,receivedDateTime&$orderby=receivedDateTime%20desc&$filter=receivedDateTime%20ge%20', formatDateTime(addDays(utcNow(), mul(variables('DaysBack'), -1)), 'yyyy-MM-ddTHH:mm:ssZ'))",
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=300&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc')",
             "Method": "GET",
             "ContentType": "application/json"
           },
@@ -98,9 +62,9 @@
         }
       },
       "B1_Messages": {
-        "runAfter": { "A2_Get_messages": ["Succeeded"] },
+        "runAfter": { "A1_Get_messages": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@body('A2_Get_messages')?['value']"
+        "inputs": "@body('A1_Get_messages')?['value']"
       },
       "B2_Select_conversations": {
         "runAfter": { "B1_Messages": ["Succeeded"] },
@@ -110,18 +74,16 @@
           "select": "@item()?['conversationId']"
         }
       },
-      "B3_Distinct_conversations": {
+      "B3_Distinct": {
         "runAfter": { "B2_Select_conversations": ["Succeeded"] },
         "type": "Compose",
         "inputs": "@union(body('B2_Select_conversations'), body('B2_Select_conversations'))"
       },
       "Loop_conversations": {
-        "runAfter": { "B3_Distinct_conversations": ["Succeeded"] },
+        "runAfter": { "B3_Distinct": ["Succeeded"] },
         "type": "Foreach",
-        "foreach": "@outputs('B3_Distinct_conversations')",
-        "runtimeConfiguration": {
-          "concurrency": { "repetitions": 1 }
-        },
+        "foreach": "@outputs('B3_Distinct')",
+        "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
         "actions": {
           "C1_Conv_messages": {
             "runAfter": {},
@@ -131,7 +93,7 @@
               "where": "@equals(item()?['conversationId'], items('Loop_conversations'))"
             }
           },
-          "C2_Conv_tagged": {
+          "C2_Tagged": {
             "runAfter": { "C1_Conv_messages": ["Succeeded"] },
             "type": "Query",
             "inputs": {
@@ -139,52 +101,41 @@
               "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
             }
           },
-          "C3_Has_category": {
-            "runAfter": { "C2_Conv_tagged": ["Succeeded"] },
+          "C3_Is_candidate": {
+            "runAfter": { "C2_Tagged": ["Succeeded"] },
             "type": "If",
             "expression": {
-              "and": [ { "greater": [ "@length(body('C2_Conv_tagged'))", 0 ] } ]
+              "and": [
+                { "greater": [ "@length(body('C2_Tagged'))", 0 ] },
+                { "greater": [ "@sub(length(body('C1_Conv_messages')), length(body('C2_Tagged')))", 0 ] },
+                { "less": [ "@length(body('C1_Conv_messages'))", 8 ] }
+              ]
             },
             "actions": {
-              "D1_Count_tagged_conv": {
+              "D1_Add_candidate": {
                 "runAfter": {},
-                "type": "IncrementVariable",
-                "inputs": { "name": "ConvsTagged", "value": 1 }
-              },
-              "D2_Count_would_inherit": {
-                "runAfter": { "D1_Count_tagged_conv": ["Succeeded"] },
-                "type": "IncrementVariable",
+                "type": "AppendToArrayVariable",
                 "inputs": {
-                  "name": "WouldInherit",
-                  "value": "@sub(length(body('C1_Conv_messages')), length(body('C2_Conv_tagged')))"
+                  "name": "Candidates",
+                  "value": {
+                    "conversationId": "@items('Loop_conversations')",
+                    "subject": "@first(body('C1_Conv_messages'))?['subject']",
+                    "total_messages": "@length(body('C1_Conv_messages'))",
+                    "already_tagged": "@length(body('C2_Tagged'))",
+                    "would_inherit": "@sub(length(body('C1_Conv_messages')), length(body('C2_Tagged')))",
+                    "category": "@first(body('C2_Tagged'))?['categories']"
+                  }
                 }
               }
             },
-            "else": {
-              "actions": {
-                "D3_Count_untagged_conv": {
-                  "runAfter": {},
-                  "type": "IncrementVariable",
-                  "inputs": { "name": "ConvsUntagged", "value": 1 }
-                }
-              }
-            }
+            "else": { "actions": {} }
           }
         }
       },
       "REPORT": {
         "runAfter": { "Loop_conversations": ["Succeeded"] },
         "type": "Compose",
-        "inputs": {
-          "total_messages": "@length(outputs('B1_Messages'))",
-          "total_conversations": "@length(outputs('B3_Distinct_conversations'))",
-          "conversations_with_category": "@variables('ConvsTagged')",
-          "conversations_without_any_category": "@variables('ConvsUntagged')",
-          "messages_tagged_today": "@length(body('B2_Select_conversations'))",
-          "messages_that_would_be_inherited": "@variables('WouldInherit')",
-          "coverage_today_pct": "@div(mul(sub(length(outputs('B1_Messages')), add(variables('WouldInherit'), 0)), 0), max(createArray(length(outputs('B1_Messages')), 1)))",
-          "inbox_subfolders": "@body('A1_Get_inbox_subfolders')?['value']"
-        }
+        "inputs": "@variables('Candidates')"
       }
     }
   }
