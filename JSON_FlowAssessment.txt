@@ -48,7 +48,7 @@
       "CONFIG_DryRun": {
         "runAfter": { "CONFIG_SubjectMarker": ["Succeeded"] },
         "type": "InitializeVariable",
-        "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": false } ] }
+        "inputs": { "variables": [ { "name": "DryRun", "type": "boolean", "value": true } ] }
       },
       "A1_Get_recent": {
         "runAfter": { "CONFIG_DryRun": ["Succeeded"] },
@@ -75,7 +75,7 @@
         "type": "Compose",
         "inputs": "@body('A1_Get_recent')?['value']"
       },
-      "B2_Demo_matches": {
+      "B2_Matches": {
         "runAfter": { "B1_Messages": ["Succeeded"] },
         "type": "Query",
         "inputs": {
@@ -84,9 +84,9 @@
         }
       },
       "B3_ConversationId": {
-        "runAfter": { "B2_Demo_matches": ["Succeeded"] },
+        "runAfter": { "B2_Matches": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@first(body('B2_Demo_matches'))?['conversationId']"
+        "inputs": "@first(body('B2_Matches'))?['conversationId']"
       },
       "B4_Thread": {
         "runAfter": { "B3_ConversationId": ["Succeeded"] },
@@ -96,36 +96,36 @@
           "where": "@equals(item()?['conversationId'], outputs('B3_ConversationId'))"
         }
       },
-      "B5_Tagged": {
+      "B5_Newest": {
         "runAfter": { "B4_Thread": ["Succeeded"] },
-        "type": "Query",
-        "inputs": {
-          "from": "@body('B4_Thread')",
-          "where": "@greater(length(coalesce(item()?['categories'], json('[]'))), 0)"
-        }
+        "type": "Compose",
+        "inputs": "@first(body('B4_Thread'))"
       },
-      "B6_Untagged": {
-        "runAfter": { "B5_Tagged": ["Succeeded"] },
+      "B6_Others_tagged": {
+        "runAfter": { "B5_Newest": ["Succeeded"] },
         "type": "Query",
         "inputs": {
           "from": "@body('B4_Thread')",
-          "where": "@equals(length(coalesce(item()?['categories'], json('[]'))), 0)"
+          "where": "@and(greater(length(coalesce(item()?['categories'], json('[]'))), 0), not(equals(item()?['id'], outputs('B5_Newest')?['id'])))"
         }
       },
       "B7_Body": {
-        "runAfter": { "B6_Untagged": ["Succeeded"] },
+        "runAfter": { "B6_Others_tagged": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@setProperty(json('{}'), 'categories', coalesce(first(body('B5_Tagged'))?['categories'], json('[]')))"
+        "inputs": "@json(concat('{\"categories\":', string(coalesce(first(body('B6_Others_tagged'))?['categories'], json('[]'))), '}'))"
       },
       "PLAN": {
         "runAfter": { "B7_Body": ["Succeeded"] },
         "type": "Compose",
         "inputs": {
           "dry_run": "@variables('DryRun')",
-          "found_conversation_id": "@outputs('B3_ConversationId')",
+          "conversation_id": "@outputs('B3_ConversationId')",
           "messages_in_thread": "@length(body('B4_Thread'))",
-          "already_tagged": "@length(body('B5_Tagged'))",
-          "will_be_tagged": "@length(body('B6_Untagged'))",
+          "newest_subject": "@outputs('B5_Newest')?['subject']",
+          "newest_received": "@outputs('B5_Newest')?['receivedDateTime']",
+          "newest_already_has_category": "@greater(length(coalesce(outputs('B5_Newest')?['categories'], json('[]'))), 0)",
+          "source_messages_with_category": "@length(body('B6_Others_tagged'))",
+          "category_to_apply": "@coalesce(first(body('B6_Others_tagged'))?['categories'], json('[]'))",
           "body_to_send": "@outputs('B7_Body')"
         }
       },
@@ -135,37 +135,30 @@
         "expression": {
           "and": [
             { "equals": [ "@variables('DryRun')", false ] },
-            { "greater": [ "@length(body('B5_Tagged'))", 0 ] },
-            { "greater": [ "@length(body('B6_Untagged'))", 0 ] }
+            { "greaterOrEquals": [ "@length(body('B4_Thread'))", 2 ] },
+            { "equals": [ "@length(coalesce(outputs('B5_Newest')?['categories'], json('[]')))", 0 ] },
+            { "greater": [ "@length(body('B6_Others_tagged'))", 0 ] }
           ]
         },
         "actions": {
-          "Loop_untagged": {
+          "Apply_category": {
             "runAfter": {},
-            "type": "Foreach",
-            "foreach": "@body('B6_Untagged')",
-            "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
-            "actions": {
-              "Apply_category": {
-                "runAfter": {},
-                "type": "OpenApiConnection",
-                "inputs": {
-                  "host": {
-                    "connectionName": "shared_office365",
-                    "operationId": "HttpRequest",
-                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
-                  },
-                  "parameters": {
-                    "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', items('Loop_untagged')?['id'])",
-                    "Method": "PATCH",
-                    "Body": "@outputs('B7_Body')",
-                    "ContentType": "application/json"
-                  },
-                  "authentication": {
-                    "type": "Raw",
-                    "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
-                  }
-                }
+            "type": "OpenApiConnection",
+            "inputs": {
+              "host": {
+                "connectionName": "shared_office365",
+                "operationId": "HttpRequest",
+                "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+              },
+              "parameters": {
+                "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', outputs('B5_Newest')?['id'])",
+                "Method": "PATCH",
+                "Body": "@outputs('B7_Body')",
+                "ContentType": "application/json"
+              },
+              "authentication": {
+                "type": "Raw",
+                "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
               }
             }
           }
