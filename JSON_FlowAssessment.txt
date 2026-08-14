@@ -60,7 +60,7 @@
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
           },
           "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=150&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc')",
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=150&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc&$filter=receivedDateTime%20ge%20', formatDateTime(addDays(utcNow(), -60), 'yyyy-MM-ddTHH:mm:ssZ'))",
             "Method": "GET",
             "ContentType": "application/json"
           },
@@ -96,37 +96,84 @@
           "where": "@equals(item()?['conversationId'], outputs('B3_ConversationId'))"
         }
       },
-      "B5_Newest": {
+      "C1_All_ticks": {
         "runAfter": { "B4_Thread": ["Succeeded"] },
-        "type": "Compose",
-        "inputs": "@first(body('B4_Thread'))"
+        "type": "Select",
+        "inputs": {
+          "from": "@body('B4_Thread')",
+          "select": "@ticks(item()?['receivedDateTime'])"
+        }
       },
-      "B6_Others_tagged": {
-        "runAfter": { "B5_Newest": ["Succeeded"] },
+      "C2_Max_tick": {
+        "runAfter": { "C1_All_ticks": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@if(empty(body('B4_Thread')), 0, max(body('C1_All_ticks')))"
+      },
+      "C3_Newest_list": {
+        "runAfter": { "C2_Max_tick": ["Succeeded"] },
         "type": "Query",
         "inputs": {
           "from": "@body('B4_Thread')",
-          "where": "@and(greater(length(coalesce(item()?['categories'], json('[]'))), 0), not(equals(item()?['id'], outputs('B5_Newest')?['id'])))"
+          "where": "@equals(ticks(item()?['receivedDateTime']), outputs('C2_Max_tick'))"
         }
       },
-      "B7_Body": {
-        "runAfter": { "B6_Others_tagged": ["Succeeded"] },
+      "C4_Newest": {
+        "runAfter": { "C3_Newest_list": ["Succeeded"] },
         "type": "Compose",
-        "inputs": "@json(concat('{\"categories\":', string(coalesce(first(body('B6_Others_tagged'))?['categories'], json('[]'))), '}'))"
+        "inputs": "@first(body('C3_Newest_list'))"
+      },
+      "D1_Others_tagged": {
+        "runAfter": { "C4_Newest": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@body('B4_Thread')",
+          "where": "@and(greater(length(coalesce(item()?['categories'], json('[]'))), 0), not(equals(item()?['id'], outputs('C4_Newest')?['id'])))"
+        }
+      },
+      "D2_Tagged_ticks": {
+        "runAfter": { "D1_Others_tagged": ["Succeeded"] },
+        "type": "Select",
+        "inputs": {
+          "from": "@body('D1_Others_tagged')",
+          "select": "@ticks(item()?['receivedDateTime'])"
+        }
+      },
+      "D3_Max_tagged_tick": {
+        "runAfter": { "D2_Tagged_ticks": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@if(empty(body('D1_Others_tagged')), 0, max(body('D2_Tagged_ticks')))"
+      },
+      "D4_Latest_tagged_list": {
+        "runAfter": { "D3_Max_tagged_tick": ["Succeeded"] },
+        "type": "Query",
+        "inputs": {
+          "from": "@body('D1_Others_tagged')",
+          "where": "@equals(ticks(item()?['receivedDateTime']), outputs('D3_Max_tagged_tick'))"
+        }
+      },
+      "D5_Source": {
+        "runAfter": { "D4_Latest_tagged_list": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@first(body('D4_Latest_tagged_list'))"
+      },
+      "E1_Body": {
+        "runAfter": { "D5_Source": ["Succeeded"] },
+        "type": "Compose",
+        "inputs": "@json(concat('{\"categories\":', string(coalesce(outputs('D5_Source')?['categories'], json('[]'))), '}'))"
       },
       "PLAN": {
-        "runAfter": { "B7_Body": ["Succeeded"] },
+        "runAfter": { "E1_Body": ["Succeeded"] },
         "type": "Compose",
         "inputs": {
           "dry_run": "@variables('DryRun')",
-          "conversation_id": "@outputs('B3_ConversationId')",
           "messages_in_thread": "@length(body('B4_Thread'))",
-          "newest_subject": "@outputs('B5_Newest')?['subject']",
-          "newest_received": "@outputs('B5_Newest')?['receivedDateTime']",
-          "newest_already_has_category": "@greater(length(coalesce(outputs('B5_Newest')?['categories'], json('[]'))), 0)",
-          "source_messages_with_category": "@length(body('B6_Others_tagged'))",
-          "category_to_apply": "@coalesce(first(body('B6_Others_tagged'))?['categories'], json('[]'))",
-          "body_to_send": "@outputs('B7_Body')"
+          "TARGET_subject": "@outputs('C4_Newest')?['subject']",
+          "TARGET_received": "@outputs('C4_Newest')?['receivedDateTime']",
+          "TARGET_already_has_category": "@greater(length(coalesce(outputs('C4_Newest')?['categories'], json('[]'))), 0)",
+          "SOURCE_received": "@outputs('D5_Source')?['receivedDateTime']",
+          "SOURCE_categories": "@outputs('D5_Source')?['categories']",
+          "body_to_send": "@outputs('E1_Body')",
+          "DEBUG_thread": "@body('B4_Thread')"
         }
       },
       "Execute_if_not_dry_run": {
@@ -136,8 +183,8 @@
           "and": [
             { "equals": [ "@variables('DryRun')", false ] },
             { "greaterOrEquals": [ "@length(body('B4_Thread'))", 2 ] },
-            { "equals": [ "@length(coalesce(outputs('B5_Newest')?['categories'], json('[]')))", 0 ] },
-            { "greater": [ "@length(body('B6_Others_tagged'))", 0 ] }
+            { "equals": [ "@length(coalesce(outputs('C4_Newest')?['categories'], json('[]')))", 0 ] },
+            { "greater": [ "@length(body('D1_Others_tagged'))", 0 ] }
           ]
         },
         "actions": {
@@ -151,9 +198,9 @@
                 "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
               },
               "parameters": {
-                "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', outputs('B5_Newest')?['id'])",
+                "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages/', outputs('C4_Newest')?['id'])",
                 "Method": "PATCH",
-                "Body": "@outputs('B7_Body')",
+                "Body": "@outputs('E1_Body')",
                 "ContentType": "application/json"
               },
               "authentication": {
