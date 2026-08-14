@@ -60,7 +60,7 @@
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
           },
           "parameters": {
-            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/messages?$top=150&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc&$filter=receivedDateTime%20ge%20', formatDateTime(addDays(utcNow(), -60), 'yyyy-MM-ddTHH:mm:ssZ'))",
+            "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', variables('MailboxAddress'), '/mailFolders/inbox/messages?$top=150&$select=id,conversationId,categories,subject,receivedDateTime&$orderby=receivedDateTime%20desc&$filter=receivedDateTime%20ge%20', formatDateTime(addDays(utcNow(), -60), 'yyyy-MM-ddTHH:mm:ssZ'))",
             "Method": "GET",
             "ContentType": "application/json"
           },
